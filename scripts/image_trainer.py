@@ -15,6 +15,7 @@ import pathlib
 import torch
 import pandas as pd
 import time
+import docker
 
 import toml
 
@@ -40,6 +41,8 @@ def format_seconds(seconds):
 
 
 def calculate_avg_loss_from_file(task_id: str):
+    import re
+
     # Read log file
     filelog = os.path.join("/workspace/axolotl/configs", f"{task_id}.log")
     with open(filelog, 'r') as f:
@@ -158,7 +161,7 @@ def create_config(task_id, model, model_type, expected_repo_name=None, hours_to_
 
     warmup_percent = 0.10
     warmup_limit = 5
-    warmup_step = 5
+    warmup_step = 1
 
     """Create the diffusion config file"""
     config_template_path = get_image_training_config_template_path(model_type, level)
@@ -259,17 +262,19 @@ def create_config(task_id, model, model_type, expected_repo_name=None, hours_to_
 def run_training(task_id, model, model_type, expected_repo_name, hours_to_complete=2):
     start_time = time.time()
 
-    docker_level = ["win1","win2","win3","win4"]
+    docker_level = ["low"]
     # docker_batch = [8,8,8,4,4,4]
-    docker_batch = [8,8,8,4,4,4,1,1,1]
+    docker_batch = [1,1,1]
     docker_seq = ["1024,1024","768,768","512,512","1024,1024","768,768","512,512","1024,1024","768,768","512,512","1024,1024","768,768","512,512"]
     docker_lrate = 0.0002
     docker_runtime = 10
     docker_config = {}
+    docker_loss = 1
 
     docker_failed = True
     idx = 0
     bdx = 0
+    docker_maxi = True
 
     # time_percent = 0.89
     # time_limit = 15
@@ -277,254 +282,7 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
     time_limit = 10
 
 
-    try:
-        while docker_failed:
-            docker_error = ""
-            dummy_batch = docker_batch[bdx]
-            dummy_batch = dummy_batch - (dummy_batch % 4)
-            if dummy_batch < 1:
-                dummy_batch = 1
-
-            end_time = time.time()
-            elapsed_time = end_time - start_time
-
-            config_path = create_config(
-                task_id,
-                model,
-                model_type,
-                expected_repo_name,
-                hours_to_complete,
-                is_warmup=True,
-                level=docker_level[idx],
-                batch=dummy_batch,
-                seq=docker_seq[bdx],
-                lrate=docker_lrate,
-                runtime=docker_runtime,
-                elaptime=elapsed_time
-            )
-
-            try:
-                print(f"Docker WARMUP ===============================")
-
-
-                print(f"Starting training with config: {config_path}", flush=True)
-                """Run the training process using the specified config file."""
-                with open(config_path, "r") as file:
-                    config = toml.load(file)
-
-                print(f"Starting training with level: {docker_level[idx]}", flush=True)
-                print(f"Starting training with gradient: {config['gradient_accumulation_steps']}", flush=True)
-                print(f"Starting training with batch: {config['train_batch_size']}", flush=True)
-                print(f"Starting training with seq: {config['resolution']}", flush=True)
-                print(f"Starting training with lrate: {config['learning_rate']}", flush=True)
-
-                # training_command = [
-                #     "accelerate", "launch",
-                #     "--dynamo_backend", "no",
-                #     "--dynamo_mode", "default",
-                #     "--mixed_precision", "bf16",
-                #     "--num_processes", "1",
-                #     "--num_machines", "1",
-                #     "--num_cpu_threads_per_process", "2",
-                #     f"/app/sd-scripts/{model_type}_train_network.py",
-                #     "--config_file", config_path
-                # ]
-
-                # training_command = f"huggingface-cli login --token $HUGGINGFACE_TOKEN --add-to-git-credential; wandb login $WANDB_TOKEN; accelerate launch -m axolotl.cli.train {config_path}" 
-
-                # training_command = f"accelerate launch -m axolotl.cli.train {config_path}" 
-
-                training_command = f"accelerate launch --dynamo_backend no --dynamo_mode default --mixed_precision bf16 --num_processes 1 --num_machines 1 --num_cpu_threads_per_process 2 /app/sd-scripts/{model_type}_train_network.py --config_file {config_path}"
-
-                print("Starting training subprocess...\n", flush=True)
-                
-                process = subprocess.Popen(
-                    training_command,
-                    shell=True,
-                    stdout=subprocess.PIPE,
-                    stderr=subprocess.STDOUT,
-                    text=True,
-                    bufsize=1
-                )
-
-
-                filelog = os.path.join("/workspace/axolotl/configs", f"{task_id}.log")
-                with open(filelog, "w") as f:
-                    for line in process.stdout:
-                        f.write(line)
-                        f.flush()
-
-                        print(line, end="", flush=True)
-
-                        end_time = time.time()
-                        elapsed_time = end_time - start_time
-
-                        if "CUDA out of memory" in line:
-                            docker_error = "OutOfMemoryError"
-                            sys.exit(docker_error) 
-                        elif "Caching is incompatible with gradient" in line:
-                            docker_error = "Cachingisincompatible"
-                            sys.exit(docker_error) 
-                        elif "get_max_length" in line:
-                            docker_error = "Getmaxlength"
-                            sys.exit(docker_error) 
-                        elif "mat1 and mat2 must have the same dtype" in line:
-                            docker_error = "Musthavethesamedtype"
-                            sys.exit(docker_error) 
-                        elif "but found Float" in line:
-                            docker_error = "ButfoundFloat"
-                            sys.exit(docker_error) 
-                        elif "tuple index out of range" in line:
-                            docker_error = "Tupleindexoutofrange"
-                            sys.exit(docker_error) 
-                        elif "list index out of range" in line:
-                            docker_error = "Listindexoutofrange"
-                            sys.exit(docker_error) 
-                        elif "DPOTrainer.create_model_card" in line:
-                            docker_error = "Dpotrainermodelcard"
-                            sys.exit(docker_error) 
-                        elif "This might be caused by insufficient shared memory" in line:
-                            docker_error = "Insufficientshared"
-                            sys.exit(docker_error) 
-                        elif "Signals.SIGKILL" in line:
-                            docker_error = "Signalskill"
-                            sys.exit(docker_error) 
-                        elif elapsed_time > int(hours_to_complete*60*60*time_percent):
-                            docker_error = "Outoftimepercent"
-                            sys.exit(docker_error) 
-                        elif elapsed_time > int((hours_to_complete*60*60)-(time_limit*60)):
-                            docker_error = "Outoftimelimit"
-                            sys.exit(docker_error) 
-
-
-                return_code = process.wait()
-                if return_code != 0:
-                    if "OutOfMemoryError" in docker_error:
-                        raise torch.OutOfMemoryError()
-                    else:
-                        raise subprocess.CalledProcessError(return_code, training_command)
-
-                print("Training subprocess completed successfully.", flush=True)
-
-
-                docker_failed = False
-
-
-            except SystemExit as e:
-                if "OutOfMemoryError" in docker_error:
-                    print("Training subprocess OutOfMemoryError!", flush=True)
-                    if bdx < len(docker_batch):
-                        bdx = bdx + 1
-                        if bdx >= len(docker_batch):
-                            bdx = len(docker_batch)-1
-                    if dummy_batch <= 4:
-                        idx = idx + 1
-                        if idx >= len(docker_level):
-                            idx = len(docker_level)-1
-                    docker_failed = True
-                elif "Insufficientshared" in docker_error:
-                    print("Training subprocess Insufficientshared!", flush=True)
-                    if bdx < len(docker_batch):
-                        bdx = bdx + 1
-                        if bdx >= len(docker_batch):
-                            bdx = len(docker_batch)-1
-                    if dummy_batch <= 4:
-                        idx = idx + 1
-                        if idx >= len(docker_level):
-                            idx = len(docker_level)-1
-                    docker_failed = True
-                elif "Signalskill" in docker_error:
-                    print("Training subprocess Signalskill!", flush=True)
-                    if bdx < len(docker_batch):
-                        bdx = bdx + 1
-                        if bdx >= len(docker_batch):
-                            bdx = len(docker_batch)-1
-                    if dummy_batch <= 4:
-                        idx = idx + 1
-                        if idx >= len(docker_level):
-                            idx = len(docker_level)-1
-                    docker_failed = True
-                elif "Cachingisincompatible" in docker_error:
-                    print("Training subprocess Cachingisincompatible!", flush=True)
-                    docker_config['gradient_checkpointing']= False
-                    docker_failed = True
-                elif "Getmaxlength" in docker_error:
-                    print("Training subprocess Getmaxlength!", flush=True)
-                    idx = idx + 1
-                    if idx >= len(docker_level):
-                        idx = len(docker_level)-1
-                    docker_failed = True
-                elif "Musthavethesamedtype" in docker_error:
-                    print("Training subprocess Musthavethesamedtype!", flush=True)
-                    idx = idx + 1
-                    if idx >= len(docker_level):
-                        idx = len(docker_level)-1
-                    docker_failed = True
-                elif "ButfoundFloat" in docker_error:
-                    print("Training subprocess ButfoundFloat!", flush=True)
-                    idx = idx + 1
-                    if idx >= len(docker_level):
-                        idx = len(docker_level)-1
-                    docker_failed = True
-                elif "Tupleindexoutofrange" in docker_error:
-                    print("Training subprocess Tupleindexoutofrange!", flush=True)
-                    idx = idx + 1
-                    if idx >= len(docker_level):
-                        idx = len(docker_level)-1
-                    docker_failed = True
-                elif "Listindexoutofrange" in docker_error:
-                    print("Training subprocess Listindexoutofrange!", flush=True)
-                    idx = 0
-                    bdx = 0
-                    docker_failed = True
-                elif "Dpotrainermodelcard" in docker_error:
-                    print("Training subprocess Dpotrainermodelcard!", flush=True)
-                    docker_failed = False
-                elif "Outoftimepercent" in docker_error:
-                    print("Training subprocess Outoftimepercent!", flush=True)
-                    docker_failed = False
-                elif "Outoftimelimit" in docker_error:
-                    print("Training subprocess Outoftimelimit!", flush=True)
-                    docker_failed = False
-
-
-            except subprocess.CalledProcessError as e:
-                print("Training subprocess failed!", flush=True)
-                print(f"Exit Code: {e.returncode}", flush=True)
-                print(f"Command: {' '.join(e.cmd) if isinstance(e.cmd, list) else e.cmd}", flush=True)
-
-                print("Training subprocess unknown!", flush=True)
-                idx = idx + 1
-                if idx >= len(docker_level):
-                    idx = len(docker_level)-1
-                docker_failed = True
-
-                # raise RuntimeError(f"Training subprocess failed with exit code {e.returncode}")
-
-
-    except Exception as e:
-        print(f"Error processing job main: {str(e)}")
-
-    finally:
-        print(f"Docker WARMUP finally ===============================")
-
-        try:
-            docker_runtime = calculate_avg_time_from_file(task_id)
-            print(f"docker_runtime: {docker_runtime}")
-
-            if model_type == ImageModelType.SDXL.value:
-                docker_runtime =  int(docker_runtime*1.1)
-            elif model_type == ImageModelType.FLUX.value:
-                docker_runtime =  int(docker_runtime*0.95)
-
-            print(f"Avg runtime: {docker_runtime}")
-
-        except Exception as e:
-            print(f"Failed to get avg runtime: {e}")
-
-
-        docker_failed = True
-
+    while docker_maxi:
         try:
             while docker_failed:
                 docker_error = ""
@@ -542,7 +300,7 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
                     model_type,
                     expected_repo_name,
                     hours_to_complete,
-                    is_warmup=False,
+                    is_warmup=True,
                     level=docker_level[idx],
                     batch=dummy_batch,
                     seq=docker_seq[bdx],
@@ -552,7 +310,7 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
                 )
 
                 try:
-                    print(f"Docker TRAINING ===============================")
+                    print(f"Docker WARMUP ===============================")
 
 
                     print(f"Starting training with config: {config_path}", flush=True)
@@ -754,7 +512,51 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
             print(f"Error processing job main: {str(e)}")
 
         finally:
-            print(f"Docker TRAINING finally ===============================")
+            print(f"Docker WARMUP finally ===============================")
+
+            try:
+                docker_runtime = calculate_avg_time_from_file(task_id)
+                print(f"docker_runtime: {docker_runtime}")
+
+                if model_type == ImageModelType.SDXL.value:
+                    docker_runtime =  int(docker_runtime*1.1)
+                elif model_type == ImageModelType.FLUX.value:
+                    docker_runtime =  int(docker_runtime*0.95)
+
+                print(f"Avg runtime: {docker_runtime}")
+
+            except Exception as e:
+                print(f"Failed to get avg runtime: {e}")
+
+
+            try:
+                dummy_loss = calculate_avg_loss_from_file(task_id)
+                print(f"dummy_loss: {dummy_loss}")
+
+                if dummy_loss < docker_loss:
+                    docker_loss = dummy_loss
+                    docker_failed = True
+
+                    # docker_client = docker.from_env()
+
+                    # try:
+                    #     container = client.containers.get('/hf-uploader')
+                    #     if container.status == 'running':
+                    #         print(f"Stopping container '{container.name}'...")
+                    #         container.stop()
+                    #         print(f"Container '{container.name}' stopped.")                        
+
+                    # except docker.errors.NotFound:
+                    #     print(f"Container 'your_container_name' not found.")
+
+                else:
+                    docker_maxi = False
+
+                print(f"Last loss: {docker_loss}")
+
+            except Exception as e:
+                print(f"Failed to get avg loss: {e}")
+
 
 
 async def main():
