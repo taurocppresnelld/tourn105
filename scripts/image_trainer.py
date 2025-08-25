@@ -15,7 +15,6 @@ import pathlib
 import torch
 import pandas as pd
 import time
-import docker
 
 import toml
 
