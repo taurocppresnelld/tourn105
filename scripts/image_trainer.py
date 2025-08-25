@@ -153,7 +153,7 @@ def get_model_path(path: str) -> str:
     return path
 
 
-def create_config(task_id, model, model_type, expected_repo_name=None, hours_to_complete=2, is_warmup=True, level="win", batch=32, seq=1024, lrate=0.0002, runtime=10, elaptime=0):
+def create_config(task_id, model, model_type, addconfig, expected_repo_name=None, hours_to_complete=2, is_warmup=True, level="win", batch=32, seq=1024, lrate=0.0002, runtime=10, elaptime=0):
     # time_percent = 0.89
     # time_limit = 15
     time_percent = 0.83
@@ -249,6 +249,9 @@ def create_config(task_id, model, model_type, expected_repo_name=None, hours_to_
     config['tokenizer_name'] = "/cache/models/models--openai--clip-vit-large-patch14"
 
 
+    config.update(addconfig)
+
+
     print(f"custom_config: {config}")
 
 
@@ -266,7 +269,8 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
     # docker_batch = [8,8,8,4,4,4]
     docker_batch = [1,1,1]
     docker_seq = ["1024,1024","768,768","512,512","1024,1024","768,768","512,512","1024,1024","768,768","512,512","1024,1024","768,768","512,512"]
-    docker_lrate = 0.0002
+    docker_lrate = 0.003
+    docker_unet_lrate = 0.0003
     docker_runtime = 10
     docker_config = {}
     docker_loss = 1
@@ -298,6 +302,7 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
                     task_id,
                     model,
                     model_type,
+                    docker_config,
                     expected_repo_name,
                     hours_to_complete,
                     is_warmup=True,
@@ -323,6 +328,9 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
                     print(f"Starting training with batch: {config['train_batch_size']}", flush=True)
                     print(f"Starting training with seq: {config['resolution']}", flush=True)
                     print(f"Starting training with lrate: {config['learning_rate']}", flush=True)
+
+                    docker_lrate = config['learning_rate']
+                    docker_unet_lrate = config['unet_lr']
 
                     # training_command = [
                     #     "accelerate", "launch",
@@ -536,6 +544,12 @@ def run_training(task_id, model, model_type, expected_repo_name, hours_to_comple
                 if dummy_loss < docker_loss:
                     docker_loss = dummy_loss
                     docker_failed = True
+
+                    docker_lrate = docker_lrate*1.5
+                    docker_unet_lrate = docker_unet_lrate*1.5
+
+                    docker_config['learning_rate'] = docker_lrate
+                    docker_config['unet_lr'] = docker_unet_lrate
 
                     # docker_client = docker.from_env()
 
